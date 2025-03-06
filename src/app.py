@@ -1,60 +1,37 @@
 """
 app.py
 
-1. Loads a trained classification model (e.g., Random Forest).
-2. Provides an interactive interface for feature input.
-3. Displays predictions and explanation plots (via SHAP).
-4. Includes robust logging and caching for performance.
+Streamlit app allowing users to:
+1) Upload a trained classification model file (.pkl or .joblib).
+2) Upload a CSV dataset (optional, for global SHAP).
+3) Provide a target column name (if needed).
+4) Perform local (single-instance) predictions + explanations.
+5) Perform global (dataset-level) SHAP explanations.
 
-Usage:
-------
-    streamlit run src/dashboard_app/app.py
+No local file references or environment variables needed.
+All artifacts are user-provided at runtime.
 
-Make sure your environment is set up with the required dependencies (see requirements.txt)
-and that you have a trained model file (e.g., models/model.pkl).
+Author: <Your Name>
+Date: 2025-03-07
 """
 
-import os
-import sys
+import io
 import logging
-from typing import Dict
+import sys
+from typing import Dict, Optional
 
 import streamlit as st
 import pandas as pd
 import shap
-
-# If you're using scikit-learn
-from sklearn.base import BaseEstimator
 import joblib
+import matplotlib.pyplot as plt
 
-# If you have a local module for predictions & explanations:
-# from src.predict import predict_instance, predict_proba
-# from src.explain import init_shap_explainer, explain_prediction
+from sklearn.base import BaseEstimator
 
-# For demonstration, we'll define minimal placeholders in this file:
-def predict_instance(model: BaseEstimator, features: Dict) -> str:
-    df = pd.DataFrame([features])
-    return str(model.predict(df)[0])
 
-def predict_proba(model: BaseEstimator, features: Dict) -> float:
-    df = pd.DataFrame([features])
-    return float(model.predict_proba(df).max())
-
-def init_shap_explainer(model: BaseEstimator, background_df: pd.DataFrame = None):
-    """
-    Initializes and returns a SHAP TreeExplainer for the given model.
-    """
-    return shap.TreeExplainer(model, data=background_df)
-
-def explain_prediction(explainer, instance_df: pd.DataFrame):
-    """
-    Returns SHAP values for a single instance.
-    """
-    return explainer.shap_values(instance_df)
-
-# --------------------------------------------------
-# Configure Logging
-# --------------------------------------------------
+# ----------------------------------------------------------------
+# Logging Config
+# ----------------------------------------------------------------
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -62,87 +39,125 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# --------------------------------------------------
-# Configurable Paths (can be read from env or constants)
-# --------------------------------------------------
-MODEL_PATH = os.getenv("MODEL_PATH", "models/model.pkl")
-BACKGROUND_DATA_PATH = os.getenv("BACKGROUND_DATA_PATH", "data/iris.csv")
-TARGET_COL = os.getenv("TARGET_COL", "species")  # Example: "species" for Iris dataset
-
-
-@st.cache_resource
-def load_artifacts() -> Dict[str, object]:
+# ----------------------------------------------------------------
+# Minimal Predict & SHAP placeholders
+# (In real usage, might be in separate 'predict.py' or 'explain.py')
+# ----------------------------------------------------------------
+def predict_instance(model: BaseEstimator, features: Dict) -> str:
     """
-    Loads the trained model and sets up the SHAP explainer.
-    Leverages Streamlit's caching to avoid re-initializing on every UI interaction.
-
-    :return: A dictionary containing the loaded model and explainer.
+    Predict class for a single feature dictionary. Returns a string label if the model outputs that.
     """
-    logger.info(f"Loading model from {MODEL_PATH}...")
-    if not os.path.exists(MODEL_PATH):
-        logger.error(f"Model file not found at {MODEL_PATH}. Please train and place it there.")
-        st.error("Model file not found. Please provide a valid model.pkl.")
-        st.stop()
+    df = pd.DataFrame([features])
+    pred = model.predict(df)[0]
+    return str(pred)
 
-    try:
-        model = joblib.load(MODEL_PATH)
-        logger.info("Model loaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        st.error(f"Failed to load model. Error: {e}")
-        st.stop()
+def predict_proba(model: BaseEstimator, features: Dict) -> float:
+    """
+    Returns the max probability for the single instance's predicted class.
+    """
+    df = pd.DataFrame([features])
+    return float(model.predict_proba(df).max())
 
-    # SHAP explainer
-    explainer = None
-    if os.path.exists(BACKGROUND_DATA_PATH):
+def init_shap_explainer(model: BaseEstimator, background_df: Optional[pd.DataFrame] = None):
+    """
+    Creates a SHAP TreeExplainer. If background_df is given, it helps for better global interpretations.
+    """
+    return shap.TreeExplainer(model, data=background_df)
+
+# ----------------------------------------------------------------
+# Helper: Store Model & Data in Session State
+# ----------------------------------------------------------------
+def load_user_model(uploaded_file) -> Optional[BaseEstimator]:
+    """
+    Reads a user-uploaded .pkl or .joblib model file and returns the model object.
+    """
+    if uploaded_file is not None:
         try:
-            bg_df = pd.read_csv(BACKGROUND_DATA_PATH)
-            if TARGET_COL in bg_df.columns:
-                bg_df.drop(columns=[TARGET_COL], inplace=True)
-            if len(bg_df) > 100:
-                # Sample for performance reasons
-                bg_df = bg_df.sample(100, random_state=42)
-            explainer = init_shap_explainer(model, background_df=bg_df)
-            logger.info("SHAP explainer initialized with background data.")
+            bytes_data = uploaded_file.read()
+            # We can load from a bytes buffer
+            model = joblib.load(io.BytesIO(bytes_data))
+            logger.info("User model loaded successfully from uploaded file.")
+            return model
         except Exception as e:
-            logger.warning(
-                f"Failed to initialize SHAP explainer with background data at {BACKGROUND_DATA_PATH}: {e}. "
-                "Will proceed without background data."
-            )
-            explainer = init_shap_explainer(model)
-    else:
-        logger.warning(f"Background data not found at {BACKGROUND_DATA_PATH}. Proceeding without it.")
-        explainer = init_shap_explainer(model)
+            logger.error(f"Failed to load model from user upload: {e}")
+            st.error(f"Failed to load model file: {e}")
+    return None
 
-    return {"model": model, "explainer": explainer}
-
-
-def main():
+def load_user_csv(uploaded_csv) -> Optional[pd.DataFrame]:
     """
-    Main function to render the Streamlit dashboard:
-    1) Title & Description
-    2) Sidebar inputs (feature sliders)
-    3) Prediction & Explanation output
+    Reads a user-uploaded CSV file into a pandas DataFrame.
     """
-    st.title("Explainable AI (XAI) Dashboard - Classification")
+    if uploaded_csv is not None:
+        try:
+            df = pd.read_csv(uploaded_csv)
+            logger.info(f"User CSV loaded successfully, shape={df.shape}.")
+            return df
+        except Exception as e:
+            logger.error(f"Failed to read CSV: {e}")
+            st.error(f"Failed to read CSV: {e}")
+    return None
 
-    st.markdown(
-        """
-        This dashboard demonstrates a classification model with explainable AI features.
-        Adjust the feature inputs on the sidebar and click "Predict & Explain" to see
-        the model's predictions and corresponding SHAP explanations.
-        """
-    )
+# ----------------------------------------------------------------
+# Pages
+# ----------------------------------------------------------------
+def page_home():
+    """
+    Home page: user uploads a model & dataset (optional).
+    We store them in st.session_state['model'] and st.session_state['df'].
+    """
+    st.title("Welcome to the Interactive XAI Dashboard!")
+    st.markdown("**Step 1:** Upload your trained model (.pkl or .joblib) and dataset (.csv).")
 
-    st.sidebar.header("Model Inputs")
+    # File uploaders
+    model_file = st.file_uploader("Upload Model File (.pkl or .joblib)", type=["pkl", "joblib"])
+    csv_file = st.file_uploader("Upload Dataset File (.csv)", type=["csv"])
 
-    # Example feature inputs for Iris dataset:
-    sepal_length = st.sidebar.slider("Sepal Length", 4.0, 8.0, 5.1, 0.1)
-    sepal_width = st.sidebar.slider("Sepal Width", 2.0, 4.5, 3.5, 0.1)
-    petal_length = st.sidebar.slider("Petal Length", 1.0, 7.0, 1.4, 0.1)
-    petal_width = st.sidebar.slider("Petal Width", 0.0, 2.5, 0.2, 0.1)
+    # If user wants to specify a target column for reference
+    st.markdown("**(Optional)** If your dataset has a target column you'd like to drop for background data or reference:")
+    target_col_user = st.text_input("Target Column Name (optional)", value="")
 
-    # Could add more logic for dynamic or additional features
+    # Load model on user request
+    if st.button("Load Artifacts"):
+        if model_file:
+            st.session_state["model"] = load_user_model(model_file)
+        else:
+            st.session_state["model"] = None
+            st.warning("No model uploaded.")
+
+        if csv_file:
+            df = load_user_csv(csv_file)
+            st.session_state["df"] = df
+            if target_col_user and target_col_user in df.columns:
+                st.session_state["target_col"] = target_col_user
+                st.success(f"Target column set to '{target_col_user}' for background data usage.")
+            else:
+                st.session_state["target_col"] = None
+        else:
+            st.session_state["df"] = None
+            st.session_state["target_col"] = None
+            st.info("No CSV uploaded, so global SHAP won't be available.")
+
+        if st.session_state.get("model"):
+            st.success("Model loaded successfully into session.")
+        st.write("**Artifacts loading process complete.**")
+
+def page_local_explanation():
+    """
+    Allows single-instance predictions and local SHAP explanation if a model is loaded.
+    """
+    st.title("Local Explanation - Single Instance")
+    if "model" not in st.session_state or st.session_state["model"] is None:
+        st.warning("No model found in session. Please upload a model on the Home page.")
+        return
+
+    model = st.session_state["model"]
+
+    # Feature sliders (example: Iris-like)
+    sepal_length = st.slider("Sepal Length", 4.0, 8.5, 5.1, 0.1)
+    sepal_width  = st.slider("Sepal Width",  2.0, 4.5,  3.5, 0.1)
+    petal_length = st.slider("Petal Length", 1.0, 8.0,  1.4, 0.1)
+    petal_width  = st.slider("Petal Width",  0.0, 3.0,  0.2, 0.1)
+
     input_data = {
         "sepal_length": sepal_length,
         "sepal_width": sepal_width,
@@ -150,36 +165,86 @@ def main():
         "petal_width": petal_width
     }
 
-    artifacts = load_artifacts()
-    model = artifacts["model"]
-    explainer = artifacts["explainer"]
-
     if st.button("Predict & Explain"):
-        # Model prediction
         try:
-            pred = predict_instance(model, input_data)
-            prob = predict_proba(model, input_data)
-            st.write(f"**Prediction:** {pred}")
-            st.write(f"**Confidence:** {prob:.2f}")
-            logger.info(f"User requested prediction. Got class '{pred}' with confidence {prob:.2f}.")
-        except Exception as e:
-            logger.error(f"Prediction failed: {e}")
-            st.error(f"Prediction failed. Error: {e}")
-            return
+            pred_class = predict_instance(model, input_data)
+            pred_prob = predict_proba(model, input_data)
+            st.write(f"**Predicted Class:** {pred_class}")
+            st.write(f"**Confidence:** {pred_prob:.2f}")
 
-        # SHAP Explanation
-        if explainer is not None:
-            st.subheader("Local Explanation with SHAP")
-            instance_df = pd.DataFrame([input_data])
-            try:
-                shap_values = explain_prediction(explainer, instance_df)
+            # Generate local SHAP
+            with st.spinner("Generating SHAP explanation..."):
+                # We can init an explainer on the fly with no background data for local only
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(pd.DataFrame([input_data]))
                 st.set_option('deprecation.showPyplotGlobalUse', False)
-                st.pyplot(shap.summary_plot(shap_values, instance_df, plot_type="bar"))
-            except Exception as e:
-                logger.warning(f"Failed to generate SHAP plot: {e}")
-                st.warning("Could not generate SHAP explanation for this instance.")
-        else:
-            st.warning("No SHAP explainer available. Check logs for errors.")
+                st.pyplot(
+                    shap.summary_plot(
+                        shap_values,
+                        pd.DataFrame([input_data]),
+                        plot_type="bar",
+                        show=False
+                    )
+                )
+        except Exception as e:
+            st.error(f"Prediction/Explanation failed: {e}")
+
+def page_global_explanation():
+    """
+    Creates a global (dataset-level) SHAP explanation if user has uploaded a CSV and a model.
+    """
+    st.title("Global Explanation - Dataset Level")
+
+    if "model" not in st.session_state or st.session_state["model"] is None:
+        st.warning("No model loaded in session. Please go to Home and upload a model.")
+        return
+    if "df" not in st.session_state or st.session_state["df"] is None:
+        st.warning("No dataset loaded. Please upload a CSV on the Home page.")
+        return
+
+    model = st.session_state["model"]
+    df_bg = st.session_state["df"].copy()
+    target_col = st.session_state["target_col"]  # might be None
+
+    # If user specified a target col, drop it
+    if target_col and target_col in df_bg.columns:
+        df_bg.drop(columns=[target_col], inplace=True)
+
+    if st.button("Generate Global SHAP Summary"):
+        try:
+            with st.spinner("Generating global SHAP explanation..."):
+                # Possibly sample for performance
+                if len(df_bg) > 500:
+                    df_bg = df_bg.sample(500, random_state=42)
+                    st.info("Sampled dataset to 500 rows for performance.")
+
+                explainer = shap.TreeExplainer(model, data=df_bg)
+                shap_values_global = explainer.shap_values(df_bg)
+
+                st.set_option('deprecation.showPyplotGlobalUse', False)
+                st.pyplot(
+                    shap.summary_plot(
+                        shap_values_global,
+                        df_bg,
+                        plot_type="bar",
+                        show=False
+                    )
+                )
+        except Exception as e:
+            st.error(f"Global SHAP generation failed: {e}")
+
+# ----------------------------------------------------------------
+# Main Layout
+# ----------------------------------------------------------------
+def main():
+    st.sidebar.title("Navigation")
+    pages = {
+        "Home": page_home,
+        "Local Explanation": page_local_explanation,
+        "Global Explanation": page_global_explanation
+    }
+    choice = st.sidebar.radio("Go to Page:", list(pages.keys()))
+    pages[choice]()
 
 
 if __name__ == "__main__":
