@@ -50,7 +50,7 @@ def save_local_explanation_bar(shap_values, instance_df: pd.DataFrame, filename=
 
 def save_force_plot_html(explainer, shap_values, instance_df: pd.DataFrame, filename="shap_force.html"):
     """
-    Saves an interactive force plot as an HTML file, which you can open in your browser.
+    Saves an interactive force plot as an HTML file, which you can open in your browser. ! needs to be fixed
     """
     force_html = shap.force_plot(
         explainer.expected_value,
